@@ -46,12 +46,12 @@ class TransformerPolicy:
 
         self.obs_dim_ = self.obs_dim
 
-        if self.algorithm_name == "mappo_dgnn":
+        if self.algorithm_name in {"mappo_dgnn", "mappo_dgnn_dsgd"}:
             from mat.algorithms.mat.algorithm.ma_gnn_transformer_new import MultiAgentGnnTransformer as MAT
             if args.iterations > 0:
                 self.obs_dim_ = self.obs_dim+args.n_embd
 
-        elif self.algorithm_name == "sr_mappo":
+        elif self.algorithm_name in {"sr_mappo", "sr_mappo_shared"}:
             from mat.algorithms.mat.algorithm.sr_mappo_transformer import SymmetryReducedMAPPO as MAT
             # SR communication is recomputed inside the policy during PPO updates,
             # so the replay buffer stores the raw local observation.
@@ -74,7 +74,7 @@ class TransformerPolicy:
                                             lr=self.lr, eps=self.opti_eps,
                                             weight_decay=self.weight_decay)
         else:
-            if self.algorithm_name == "mappo_dgnn":
+            if self.algorithm_name in {"mappo_dgnn", "mappo_dgnn_dsgd"}:
                 self.optimizers = [
                     torch.optim.Adam(
                         list(self.transformer.decoder.mlp_[i].parameters()) +
@@ -90,8 +90,21 @@ class TransformerPolicy:
                     )
                     for i in range(self.num_agents)
                 ]
+            elif self.algorithm_name == "sr_mappo":
+                self.optimizers = [
+                    torch.optim.Adam(
+                        self.agent_parameters(i),
+                        lr=self.lr,
+                        eps=self.opti_eps,
+                        weight_decay=self.weight_decay,
+                    )
+                    for i in range(self.num_agents)
+                ]
             else:
-                raise ValueError("Distributed optimizer mode is supported only for mappo_dgnn")
+                raise ValueError(
+                    "Distributed optimizer mode is supported only for "
+                    "mappo_dgnn and sr_mappo"
+                )
 
     def agent_parameters(self, agent_idx):
         """Returns all parameters specific to one agent"""
@@ -101,7 +114,19 @@ class TransformerPolicy:
         params.extend(list(self.transformer.decoder.mlp_[agent_idx].parameters()))
         params.extend(list(self.transformer.encoder.head_[agent_idx].parameters()))
 
-        # Observation encoder components
+        if self.algorithm_name == "sr_mappo":
+            params.extend(
+                list(self.transformer.obs_encoder.agent_codecs[agent_idx].parameters())
+            )
+            params.extend(
+                list(self.transformer.obs_encoder.agent_fusers[agent_idx].parameters())
+            )
+            params.extend(
+                list(self.transformer.obs_encoder.agent_readouts[agent_idx].parameters())
+            )
+            return params
+
+        # Original D-GAT observation encoder components.
         params.extend(list(self.transformer.obs_encoder.agent_encoders[agent_idx].parameters()))
         params.extend(list(self.transformer.obs_encoder.node_classifier_heads[agent_idx].parameters()))
         params.extend([self.transformer.obs_encoder.atts[k][agent_idx] for k in range(self.transformer.obs_encoder.K)])
@@ -198,7 +223,7 @@ class TransformerPolicy:
         if available_actions is not None:
             available_actions = available_actions.reshape(-1, self.num_agents, self.act_dim)
 
-        if self.algorithm_name == "sr_mappo":
+        if self.algorithm_name in {"sr_mappo", "sr_mappo_shared"}:
             values = self.transformer.get_values(
                 cent_obs, obs, available_actions, graph_context=graph_context
             )
@@ -236,7 +261,7 @@ class TransformerPolicy:
         if available_actions is not None:
             available_actions = available_actions.reshape(-1, self.num_agents, self.act_dim)
 
-        if self.algorithm_name == "sr_mappo":
+        if self.algorithm_name in {"sr_mappo", "sr_mappo_shared"}:
             action_log_probs, values, entropy = self.transformer(
                 cent_obs,
                 obs,

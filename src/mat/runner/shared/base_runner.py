@@ -136,7 +136,7 @@ class Runner(object):
         if self.buffer.available_actions is None:
             graph_context = (
                 self.buffer.adjcency_matrix[-1]
-                if self.algorithm_name == "sr_mappo"
+                if self.algorithm_name in {"sr_mappo", "sr_mappo_shared"}
                 else None
             )
             next_values = self.trainer.policy.get_values(self.buffer.share_obs[-1],
@@ -147,7 +147,7 @@ class Runner(object):
         else:
             graph_context = (
                 self.buffer.adjcency_matrix[-1]
-                if self.algorithm_name == "sr_mappo"
+                if self.algorithm_name in {"sr_mappo", "sr_mappo_shared"}
                 else None
             )
             next_values = self.trainer.policy.get_values(self.buffer.share_obs[-1],

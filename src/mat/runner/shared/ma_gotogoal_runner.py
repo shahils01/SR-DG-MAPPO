@@ -5,7 +5,6 @@ import wandb
 import numpy as np
 from functools import reduce
 import torch
-import imageio
 import gymnasium as gym
 import torch.nn.functional as F
 
@@ -24,7 +23,14 @@ def faulty_action(action, faulty_node):
     # return action
     return action_fault
 
-GRAPH_ALGORITHMS = {"mappo_gnn", "mappo_dgnn", "mappo_dgnn_dsgd", "sr_mappo", "consensus_ippo"}
+SR_ALGORITHMS = {"sr_mappo", "sr_mappo_shared"}
+GRAPH_ALGORITHMS = {
+    "mappo_gnn",
+    "mappo_dgnn",
+    "mappo_dgnn_dsgd",
+    *SR_ALGORITHMS,
+    "consensus_ippo",
+}
 GNN_ALGORITHMS = {"mappo_gnn", "mappo_dgnn", "mappo_dgnn_dsgd"}
 
 
@@ -377,7 +383,7 @@ class MAGoToGoalRunner(Runner):
             adjcency_matrix = torch.tensor(adjcency_matrix, dtype=torch.float32, device=self.device)
             self.buffer.adjcency_matrix[0] = adjcency_matrix.clone()
 
-        if self.algorithm_name == "sr_mappo":
+        if self.algorithm_name in SR_ALGORITHMS:
             adjcency_matrix = self.envs.get_visibility_matrix()
             adjcency_matrix = torch.as_tensor(
                 adjcency_matrix, dtype=torch.float32, device=self.device
@@ -413,7 +419,7 @@ class MAGoToGoalRunner(Runner):
     @torch.no_grad()
     def collect(self, step, batched_edge_index=None):
         self.trainer.prep_rollout()
-        if self.algorithm_name == "sr_mappo":
+        if self.algorithm_name in SR_ALGORITHMS:
             batched_edge_index = self.buffer.adjcency_matrix[step]
         value, action, action_log_prob, rnn_state, rnn_state_critic = self.trainer.policy.get_actions(
                         self.buffer.share_obs[step],
@@ -520,7 +526,7 @@ class MAGoToGoalRunner(Runner):
 
                 x = self.trainer.policy.transformer.obs_encoder(eval_obs, batch_edge_index)
                 eval_obs = torch.cat([eval_obs,x],dim=-1).detach()
-            elif self.algorithm_name == "sr_mappo":
+            elif self.algorithm_name in SR_ALGORITHMS:
                 batch_edge_index = torch.as_tensor(
                     self.eval_envs.get_visibility_matrix(),
                     dtype=torch.float32,

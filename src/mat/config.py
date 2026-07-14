@@ -157,9 +157,23 @@ def get_config():
         description='onpolicy', formatter_class=argparse.RawDescriptionHelpFormatter)
 
     # prepare parameters
-    parser.add_argument("--algorithm_name", type=str,
-                        default='mappo_dgnn', choices=["mappo_dgnn", "sr_mappo"],
-                        help="sr_mappo: symmetry-reduced quantized communication; mappo_dgnn: original distributed GNN baseline")
+    parser.add_argument(
+        "--algorithm_name",
+        type=str,
+        default="mappo_dgnn",
+        choices=[
+            "mappo_dgnn",
+            "mappo_dgnn_dsgd",
+            "sr_mappo",
+            "sr_mappo_shared",
+        ],
+        help=(
+            "sr_mappo: distributed symmetry-reduced D-GAT with D-SGD; "
+            "sr_mappo_shared: shared-codec ablation; "
+            "mappo_dgnn_dsgd: original neighbor-averaged DG-MAPPO; "
+            "mappo_dgnn: shared-optimizer graph baseline"
+        ),
+    )
 
     parser.add_argument("--experiment_name", type=str, default="check", help="an identifier to distinguish different experiment.")
     parser.add_argument("--seed", type=int, default=1, help="Random seed for numpy/torch")

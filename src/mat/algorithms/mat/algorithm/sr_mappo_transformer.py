@@ -15,7 +15,11 @@ from mat.algorithms.utils.transformer_act import (
 )
 from mat.algorithms.utils.util import check, init
 from sr_dg_mappo.codec import MapCodec, local_reconstruction_loss
-from sr_dg_mappo.communication import SymmetryReducedCommunicator
+from sr_dg_mappo.communication import (
+    InvariantMapAttention,
+    SymmetryReducedCommunicator,
+    SymmetryReducedDGATCommunicator,
+)
 
 
 def _init_layer(layer: nn.Module, gain: float = 0.01, activate: bool = False) -> nn.Module:
@@ -215,6 +219,119 @@ class SymmetryReducedObservationEncoder(nn.Module):
         return self._metrics
 
 
+class DistributedSymmetryReducedObservationEncoder(SymmetryReducedObservationEncoder):
+    """Per-agent SR codecs with invariant D-GAT aggregation and consensus hooks."""
+
+    def __init__(self, args, obs_dim: int, output_dim: int) -> None:
+        super().__init__(args, obs_dim, output_dim)
+        del self.codec
+        del self.communicator
+        del self.readout
+
+        codec_kwargs = dict(
+            num_targets=self.num_targets,
+            hidden_dim=int(args.sr_hidden_dim),
+            latent_dim=int(args.sr_latent_dim),
+            num_codebooks=int(args.sr_num_codebooks),
+            codebook_size=int(args.sr_codebook_size),
+            coordinate_scale=max(float(args.world_size), 1.0),
+        )
+        self.agent_codecs = nn.ModuleList(
+            [MapCodec(**codec_kwargs) for _ in range(self.num_agents)]
+        )
+        attention_hidden_dim = max(int(args.sr_hidden_dim) // 2, 8)
+        self.agent_fusers = nn.ModuleList(
+            [
+                InvariantMapAttention(
+                    hidden_dim=attention_hidden_dim,
+                    coordinate_scale=max(float(args.world_size), 1.0),
+                )
+                for _ in range(self.num_agents)
+            ]
+        )
+        map_dim = self.num_targets * 3
+        self.agent_readouts = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.LayerNorm(map_dim),
+                    nn.Linear(map_dim, output_dim),
+                    nn.GELU(),
+                    nn.Linear(output_dim, output_dim),
+                )
+                for _ in range(self.num_agents)
+            ]
+        )
+        self.communicator = SymmetryReducedDGATCommunicator(
+            self.agent_codecs,
+            self.agent_fusers,
+            rounds=int(args.sr_comm_rounds),
+        )
+
+    @property
+    def bits_per_message(self) -> int:
+        return int(self.agent_codecs[0].bits_per_message)
+
+    def forward(self, obs: Tensor, graph_context: Optional[Tensor] = None) -> Tensor:
+        positions, frames, local_points, confidence, observed_adjacency = self._parse(obs)
+        adjacency = observed_adjacency if graph_context is None else graph_context
+        adjacency = adjacency.to(device=obs.device, dtype=obs.dtype)
+        if adjacency.shape != observed_adjacency.shape:
+            adjacency = adjacency.reshape_as(observed_adjacency)
+
+        communicated = self.communicator(
+            positions,
+            frames,
+            local_points,
+            confidence,
+            adjacency,
+        )
+        local_outputs = [
+            codec(local_points[:, agent_id], confidence[:, agent_id])
+            for agent_id, codec in enumerate(self.agent_codecs)
+        ]
+        reconstruction = torch.stack(
+            [
+                local_reconstruction_loss(
+                    output,
+                    local_points[:, agent_id],
+                    confidence[:, agent_id],
+                )
+                for agent_id, output in enumerate(local_outputs)
+            ]
+        )
+        local_vq = torch.stack([output.vq_loss for output in local_outputs])
+        vq_loss = 0.5 * (local_vq + communicated.agent_codec_loss)
+        self._auxiliary_loss = (
+            self.reconstruction_coef * reconstruction + self.vq_coef * vq_loss
+        ).unsqueeze(-1)
+        self._metrics = {
+            "sr_reconstruction_loss": reconstruction.detach().mean(),
+            "sr_vq_loss": vq_loss.detach().mean(),
+            "sr_bits_per_message": obs.new_tensor(float(self.bits_per_message)),
+            "sr_bits_per_agent": communicated.bits_per_agent.detach(),
+            "sr_codebook_perplexity": communicated.agent_perplexity.detach().mean(),
+            "sr_map_coverage": communicated.map_confidence.detach().mean(),
+            "sr_attention_entropy": communicated.attention_entropy.detach().mean(),
+        }
+
+        normalized_points = communicated.map_points / max(self.half_world, 1e-6)
+        map_features = torch.cat(
+            (normalized_points, communicated.map_confidence.unsqueeze(-1)), dim=-1
+        ).flatten(start_dim=-2)
+        return torch.stack(
+            [
+                readout(map_features[:, agent_id])
+                for agent_id, readout in enumerate(self.agent_readouts)
+            ],
+            dim=1,
+        )
+
+    def consensus_module_lists(self):
+        """Return identically structured per-agent modules mixed by D-SGD."""
+
+        return (self.agent_codecs, self.agent_fusers, self.agent_readouts)
+
+
 class SymmetryReducedMAPPO(nn.Module):
     """Original DG-MAPPO per-agent actor/critic heads with an SR message front end."""
 
@@ -241,7 +358,12 @@ class SymmetryReducedMAPPO(nn.Module):
         self.action_type = action_type
         self.device = torch.device(device)
         self.tpdv = dict(dtype=torch.float32, device=self.device)
-        self.obs_encoder = SymmetryReducedObservationEncoder(args, obs_dim, n_embd)
+        if args.algorithm_name == "sr_mappo":
+            self.obs_encoder = DistributedSymmetryReducedObservationEncoder(
+                args, obs_dim, n_embd
+            )
+        else:
+            self.obs_encoder = SymmetryReducedObservationEncoder(args, obs_dim, n_embd)
         del n_block, n_head, encode_state, dec_actor, share_actor
         self.encoder = DistributedCritic(
             args, state_dim, obs_dim, n_embd, n_agent, num_quants

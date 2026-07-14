@@ -71,8 +71,14 @@ class MARLTrainingSmokeTests(unittest.TestCase):
     def test_original_dg_mappo_baseline_updates(self):
         self._run("mappo_dgnn")
 
+    def test_distributed_dg_mappo_baseline_updates(self):
+        self._run("mappo_dgnn_dsgd")
+
     def test_symmetry_reduced_mappo_updates(self):
         self._run("sr_mappo")
+
+    def test_shared_codec_ablation_updates(self):
+        self._run("sr_mappo_shared")
 
 
 if __name__ == "__main__":

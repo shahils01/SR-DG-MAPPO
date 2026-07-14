@@ -8,9 +8,9 @@ The repository now contains two connected layers:
 
 - the original DG-MAPPO predator–prey environment, rollout buffer, PPO trainer,
   per-agent actor/critic heads, and distributed graph baseline;
-- a learned product-VQ scene-map codec with analytic sender-to-receiver frame
-  transport, multi-hop fusion, auxiliary reconstruction training, and exact
-  communication-rate accounting.
+- per-agent product-VQ scene-map codecs with analytic sender-to-receiver frame
+  transport, invariant graph attention, auxiliary reconstruction training,
+  exact rate accounting, and graph-neighbor D-SGD parameter consensus.
 
 The main design principle is:
 
@@ -21,14 +21,17 @@ The main design principle is:
 The project can train MARL policies in the long-range continuous
 predator–prey environment with either:
 
-- `mappo_dgnn`: the ported DG-MAPPO graph-communication baseline;
-- `sr_mappo`: PPO with differentiable symmetry-reduced quantized communication.
+- `mappo_dgnn_dsgd`: the ported neighbor-averaged DG-MAPPO baseline;
+- `sr_mappo`: DG-MAPPO with per-agent symmetry-reduced D-GAT and D-SGD;
+- `sr_mappo_shared`: the earlier shared-codec/shared-optimizer ablation;
+- `mappo_dgnn`: a shared-optimizer graph baseline.
 
 The rollout buffer stores raw decentralized observations and graph state.
-`sr_mappo` recomputes communication inside each PPO minibatch, so gradients
-reach the encoder, codebook, decoder, and policy. The simulator global state is
-available to the MAPPO training interface but is not used as a reconstruction
-target.
+`sr_mappo` recomputes communication inside each PPO minibatch. Every agent
+updates its own codec, invariant attention fuser, readout, actor, and critic
+from its local PPO objective. Corresponding modules are then averaged over the
+sampled communication graph. The simulator global state is available to the
+MAPPO training interface but is not used as a reconstruction target.
 
 ## Installation
 
@@ -66,7 +69,7 @@ sr-dg-mappo-train \
 
 ```bash
 sr-dg-mappo-train \
-  --algorithm_name mappo_dgnn \
+  --algorithm_name mappo_dgnn_dsgd \
   --env_device cuda \
   --num_env_steps 1000000 \
   --n_rollout_threads 64 \
@@ -128,8 +131,9 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
 The suite includes environment-contract tests, group and codec tests,
-end-to-end PPO updates for both algorithms, and a gradient check proving that
-the SR codebook participates in training.
+equivariance tests for invariant graph attention, neighbor-consensus tests,
+end-to-end PPO updates for all wired algorithms, and gradient checks proving
+that every per-agent SR codebook participates in training.
 
 ## Research comparisons
 
@@ -141,8 +145,9 @@ The intended full study is:
 4. full symmetry-reduced quantized communication;
 5. no communication.
 
-Current code establishes items 1 and 4. The remaining ablations are the next
-experimental implementation milestone.
+Current code establishes items 1 and 4, plus the shared-codec ablation. The
+non-equivariant quantized, equivariant uncompressed, and no-communication
+ablations remain the next experimental implementation milestone.
 
 ## Provenance and license
 

@@ -267,7 +267,17 @@ def configure_algorithm(all_args):
         all_args.iterations = 0
         all_args.n_quants = 1
 
+    if all_args.algorithm_name == "mappo_dgnn_dsgd":
+        all_args.iterations = max(int(all_args.iterations), 1)
+        all_args.truelyDistributed = True
+        all_args.n_quants = 1
+
     if all_args.algorithm_name == "sr_mappo":
+        all_args.iterations = max(int(all_args.iterations), 1)
+        all_args.truelyDistributed = True
+        all_args.n_quants = 1
+
+    if all_args.algorithm_name == "sr_mappo_shared":
         all_args.iterations = max(int(all_args.iterations), 1)
         all_args.truelyDistributed = False
         all_args.n_quants = 1

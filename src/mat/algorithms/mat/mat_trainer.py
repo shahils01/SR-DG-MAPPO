@@ -250,6 +250,54 @@ class MATTrainer:
 
         return self.critic_parameter_disagreement(adj)
 
+    def module_list_parameter_disagreement(self, modules, adj):
+        """Weighted neighbor disagreement for identically structured agent modules."""
+
+        weights = self.consensus_weight_matrix(adj)
+        total = torch.zeros((), dtype=torch.float32, device=self.device)
+        norm = torch.zeros((), dtype=torch.float32, device=self.device)
+        with torch.no_grad():
+            snapshots = [[p.detach() for p in module.parameters()] for module in modules]
+            for i in range(self.num_agents):
+                for j in range(self.num_agents):
+                    if i == j or weights[i, j] <= 0:
+                        continue
+                    for parameter_i, parameter_j in zip(snapshots[i], snapshots[j]):
+                        total = total + weights[i, j] * (
+                            parameter_i - parameter_j
+                        ).square().mean()
+                    norm = norm + weights[i, j]
+        return total / norm.clamp_min(1e-8)
+
+    def apply_sr_parameter_consensus(self, adj):
+        """Apply the same graph-neighbor D-SGD mixing to every SR agent block."""
+
+        if adj is None:
+            consensus_adj = torch.ones(
+                self.num_agents,
+                self.num_agents,
+                dtype=torch.float32,
+                device=self.device,
+            )
+        elif adj.dim() == 3:
+            consensus_adj = adj.float().mean(dim=0)
+        else:
+            consensus_adj = adj.float()
+
+        module_lists = [
+            *self.policy.transformer.obs_encoder.consensus_module_lists(),
+            self.policy.transformer.encoder.head_,
+            self.policy.transformer.decoder.mlp_,
+        ]
+        for modules in module_lists:
+            average_agent_encoders_by_adj(modules, consensus_adj)
+
+        disagreements = [
+            self.module_list_parameter_disagreement(modules, consensus_adj)
+            for modules in module_lists
+        ]
+        return torch.stack(disagreements).mean()
+
 
     def ppo_update(self, sample, episode, iter_step, obs_dim=None):
         share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, \
@@ -312,7 +360,7 @@ class MATTrainer:
                 active_masks_batch,
                 graph_context=(
                     adjcency_matrix_batch
-                    if self.policy.algorithm_name == "sr_mappo"
+                    if self.policy.algorithm_name in {"sr_mappo", "sr_mappo_shared"}
                     else None
                 ),
             )
@@ -353,7 +401,7 @@ class MATTrainer:
 
         auxiliary_loss = torch.zeros((), dtype=torch.float32, device=self.device)
         auxiliary_metrics = {}
-        if self.policy.algorithm_name == "sr_mappo":
+        if self.policy.algorithm_name in {"sr_mappo", "sr_mappo_shared"}:
             auxiliary_loss = self.policy.transformer.auxiliary_loss()
             auxiliary_metrics = self.policy.transformer.auxiliary_metrics()
             loss = loss + auxiliary_loss
@@ -384,13 +432,18 @@ class MATTrainer:
                 all_grads.append(grads)
 
             # Apply gradients and step optimizers
+            grad_norms = []
             for i, grads in enumerate(all_grads):
                 for param, grad in zip(self.policy.agent_parameters(i), grads):
                     if grad is not None:
                         param.grad = grad
                 if self._use_max_grad_norm:
                     grad_norm = torch.nn.utils.clip_grad_norm_(self.policy.agent_parameters(i), self.max_grad_norm)
+                else:
+                    grad_norm = get_gard_norm(self.policy.agent_parameters(i))
+                grad_norms.append(torch.as_tensor(grad_norm, device=self.device))
                 self.policy.optimizers[i].step()
+            grad_norm = torch.stack(grad_norms).mean()
 
         else:
             # Total loss for this agent
@@ -413,6 +466,11 @@ class MATTrainer:
         critic_consensus_error = torch.zeros((), dtype=torch.float32, device=self.device)
         if self.critic_consensus:
             critic_consensus_error = self.apply_critic_consensus(adjcency_matrix_batch)
+
+        if self.policy.algorithm_name == "sr_mappo":
+            auxiliary_metrics["sr_parameter_consensus_error"] = (
+                self.apply_sr_parameter_consensus(adjcency_matrix_batch).detach()
+            )
 
         for _ in range(1):
             if self.policy.algorithm_name == 'mappo_dgnn_dsgd':
@@ -441,7 +499,7 @@ class MATTrainer:
             imp_weights,
             avg_gnn_consensus_loss,
             critic_consensus_error,
-            auxiliary_loss.detach(),
+            auxiliary_loss.detach().mean(),
             auxiliary_metrics,
         )
 

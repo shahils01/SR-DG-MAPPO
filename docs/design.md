@@ -14,12 +14,14 @@ M_i = {(p_im, c_im)} for targets m = 1, ..., M,
 ```
 
 where `p_im` is a two-dimensional relative position and `c_im` is confidence.
-At every communication round, an agent encodes its current map into product-VQ
-tokens. Neighbors decode the map, analytically transport its points into their
-own frames, and confidence-weight the received estimates with their existing
-maps. The fused fixed-size map is re-encoded on the next round. Consequently,
-traffic is fixed per directed edge per round rather than growing with the
-number of message origins.
+At every communication round, each agent encodes its current map with its own
+product-VQ codec. Neighbors decode the map, analytically transport its points
+into their own frames, and apply receiver-specific graph attention. Attention
+logits use only invariant confidence, squared distance, and squared
+disagreement; the weighted coordinate sum is performed after frame alignment.
+The fused fixed-size map is re-encoded on the next round. Consequently, traffic
+is fixed per directed edge per round rather than growing with the number of
+message origins.
 
 ## Symmetry and gauge distinction
 
@@ -73,6 +75,9 @@ The implemented integration is:
 5. Use simulator global state only to report raw and quotient inference error.
 6. Log message bits, bits per agent, reconstruction, codebook perplexity, and
    map coverage alongside PPO metrics.
+7. Maintain per-agent codec, attention, readout, actor, and critic modules;
+   update them with agent-local PPO gradients and then mix corresponding
+   parameters over the communication graph using DG-MAPPO's D-SGD rule.
 
 Sweeping codebook size and token count to estimate a return-versus-bits Pareto
 frontier is now an experiment task rather than an architectural dependency.
