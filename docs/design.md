@@ -2,10 +2,10 @@
 
 ## Scope of the initial version
 
-SR-DG-MAPPO v0.1 implements the smallest system that can falsify the proposed
-communication hypothesis. It does not reproduce the full DG-MAPPO training
-stack. Instead, it makes the inferred scene representation and transmitted bit
-rate explicit.
+SR-DG-MAPPO now contains a trainable predator–prey MAPPO stack ported from
+DG-MAPPO. The standalone diagnostic remains the smallest system that can
+falsify the rate–distortion hypothesis, while `sr_mappo` evaluates whether the
+same mechanism improves control at a fixed message budget.
 
 Each agent maintains a fixed-size target map in its own coordinate frame:
 
@@ -60,18 +60,22 @@ reported separately.
 
 ## Integration with DG-MAPPO
 
-The intended integration is:
+The implemented integration is:
 
 1. Replace the opaque float32 D-GAT message with codec tokens.
 2. Keep the communication module inside the training computation graph; do not
    store only detached latents in the rollout buffer.
 3. Feed the fused receiver-frame map, or an invariant readout of it, to each
    actor and critic alongside the raw local observation.
-4. Optimize PPO loss, local reconstruction, equivariance consistency, and VQ
-   commitment loss jointly.
+4. Optimize PPO loss, local reconstruction, and VQ commitment/codebook losses
+   jointly. Frame equivariance is analytic for the transport layer and is
+   monitored by tests rather than approximated by a learned penalty.
 5. Use simulator global state only to report raw and quotient inference error.
-6. Sweep codebook size and token count to estimate a return-versus-bits Pareto
-   frontier.
+6. Log message bits, bits per agent, reconstruction, codebook perplexity, and
+   map coverage alongside PPO metrics.
+
+Sweeping codebook size and token count to estimate a return-versus-bits Pareto
+frontier is now an experiment task rather than an architectural dependency.
 
 ## Theoretical target
 

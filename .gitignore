@@ -7,4 +7,6 @@ __pycache__/
 build/
 dist/
 outputs/
+results/
+*_training.npy
 .DS_Store
