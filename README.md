@@ -1,76 +1,128 @@
 # SR-DG-MAPPO
 
-**Symmetry-Reduced Distributed Graph-Attention MAPPO** is an initial research
-prototype for testing whether agents can infer global scene content while
-transmitting fewer bits by communicating in local coordinate frames.
+**Symmetry-Reduced Distributed Graph MAPPO** is a trainable extension of
+DG-MAPPO for studying rate-limited, frame-equivariant communication in
+cooperative multi-agent reinforcement learning.
 
-This repository deliberately isolates the communication hypothesis before it
-is coupled to a full PPO implementation. It provides:
+The repository now contains two connected layers:
 
-- analytic `O(2)` sender-to-receiver frame transport, including rotations and reflections;
-- a product-vector-quantized scene-map codec with a fixed, auditable bit rate;
-- an uncompressed matched-architecture baseline;
-- fixed-size multi-hop map fusion over a dynamic communication graph;
-- exact `D4` transformations for square-world symmetry tests;
-- quotient-space reconstruction error, coverage, and communication-rate metrics;
-- a synthetic predator-prey-style experiment that trains without global-state supervision.
+- the original DG-MAPPO predator–prey environment, rollout buffer, PPO trainer,
+  per-agent actor/critic heads, and distributed graph baseline;
+- per-agent product-VQ scene-map codecs with analytic sender-to-receiver frame
+  transport, invariant graph attention, auxiliary reconstruction training,
+  exact rate accounting, and graph-neighbor D-SGD parameter consensus.
 
 The main design principle is:
 
-> Learn the scene content; compute known relative geometry analytically.
+> Learn scene content; compute known relative geometry analytically.
 
-A sender encodes target positions in its own local frame. The receiver decodes
-the message and transports the result into its own frame using the relative
-pose. Global rotations, translations, or reflections therefore do not need to
-be relearned by the content codec.
+## Current milestone
 
-## Status
+The project can train MARL policies in the long-range continuous
+predator–prey environment with either:
 
-This is a **communication and state-inference prototype**, not yet a complete
-MAPPO trainer. It is intended to de-risk the codec, symmetry, and rate-distortion
-parts before integration into DG-MAPPO.
+- `mappo_dgnn_dsgd`: the ported neighbor-averaged DG-MAPPO baseline;
+- `sr_mappo`: DG-MAPPO with per-agent symmetry-reduced D-GAT and D-SGD;
+- `sr_mappo_shared`: the earlier shared-codec/shared-optimizer ablation;
+- `mappo_dgnn`: a shared-optimizer graph baseline.
+
+The rollout buffer stores raw decentralized observations and graph state.
+`sr_mappo` recomputes communication inside each PPO minibatch. Every agent
+updates its own codec, invariant attention fuser, readout, actor, and critic
+from its local PPO objective. Corresponding modules are then averaged over the
+sampled communication graph. The simulator global state is available to the
+MAPPO training interface but is not used as a reconstruction target.
 
 ## Installation
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e '.[marl]'
 ```
 
-For development:
+For tests and linting:
 
 ```bash
-pip install -e '.[dev]'
+pip install -e '.[marl,dev]'
 ```
 
-## Run the demonstration
+If `torch-geometric` is installed, `mappo_dgnn` uses the original AERO-GNN
+encoder. Otherwise, the repository selects a dependency-free dense-attention
+fallback with the same per-agent encoder interface.
+
+## Train predator–prey
+
+### Symmetry-reduced MAPPO
+
+```bash
+sr-dg-mappo-train \
+  --algorithm_name sr_mappo \
+  --env_device cuda \
+  --num_env_steps 1000000 \
+  --n_rollout_threads 64 \
+  --experiment_name sr_seed1 \
+  --seed 1
+```
+
+### DG-MAPPO baseline
+
+```bash
+sr-dg-mappo-train \
+  --algorithm_name mappo_dgnn_dsgd \
+  --env_device cuda \
+  --num_env_steps 1000000 \
+  --n_rollout_threads 64 \
+  --experiment_name dgnn_seed1 \
+  --seed 1
+```
+
+Use `--no_cuda --env_device cpu` for a CPU run. Without installing the package,
+the equivalent source-tree entry point is:
+
+```bash
+PYTHONPATH=src python scripts/train_predator_prey.py [arguments]
+```
+
+Checkpoints and TensorBoard logs are written beneath `results/`. Set
+`SR_DG_MAPPO_RESULTS=/path/to/scratch/results` to redirect them on a cluster.
+See [docs/marl-integration.md](docs/marl-integration.md) for the loss,
+observation contract, Palmetto smoke command, and experiment plan.
+
+## Communication configuration
+
+The main `sr_mappo` controls are:
+
+```text
+--sr_comm_rounds
+--sr_num_codebooks
+--sr_codebook_size
+--sr_latent_dim
+--sr_reconstruction_coef
+--sr_vq_coef
+```
+
+For `Q` product-codebook tokens and codebook size `K`, every message contains
+
+```text
+Q * ceil(log2(K)) bits.
+```
+
+The default `Q=4`, `K=16` payload is 16 bits. Relative pose is treated as
+locally available side information and is not included in this payload; this
+assumption must be changed for deployments that transmit pose explicitly.
+
+## Standalone codec diagnostic
+
+The earlier rate–distortion diagnostic remains available:
 
 ```bash
 sr-dg-mappo-demo --steps 200 --rounds 2
 ```
 
-or without installation:
-
-```bash
-PYTHONPATH=src python -m sr_dg_mappo.demo --steps 200 --rounds 2
-```
-
-The command prints JSON containing:
-
-- local reconstruction loss;
-- receiver-frame global-map distortion and coverage;
-- `D4` quotient reconstruction error;
-- maximum equivariance error after a global transformation;
-- bits per message and bits per agent per communication step;
-- the corresponding uncompressed float32 baseline.
-
-A deterministic 200-step CPU reference run with the default configuration
-produced a 16-bit message versus 192 bits for the uncompressed baseline
-(91.7% payload reduction), while the maximum frame-equivariance error remained
-below `5e-7`. These are prototype diagnostics rather than MARL performance
-claims; the learned codec trades the lower rate for non-zero reconstruction
-distortion.
+The deterministic reference configuration produced a 16-bit message versus
+192 bits for the uncompressed map, with frame-equivariance error below `5e-7`.
+This diagnostic is not a policy-performance result.
 
 ## Tests
 
@@ -78,44 +130,27 @@ distortion.
 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
-## Core formulation
+The suite includes environment-contract tests, group and codec tests,
+equivariance tests for invariant graph attention, neighbor-consensus tests,
+end-to-end PPO updates for all wired algorithms, and gradient checks proving
+that every per-agent SR codebook participates in training.
 
-For sender `j` and receiver `i`, a point expressed in the sender frame is
-transported as
+## Research comparisons
 
-```text
-p_i = F_i^T (t_j + F_j p_j - t_i),
-```
+The intended full study is:
 
-where `t` is position and `F` is an orthogonal local frame. The learned message
-contains only a quantized description of `p_j` and its confidence. Relative pose
-is treated as known side information and is not charged as message content in
-the demo; an integration must charge it when the deployment cannot infer it
-from sensing.
-
-For `Q` product-codebook tokens and codebook size `K`, each fixed-rate message
-uses
-
-```text
-Q * ceil(log2(K)) bits.
-```
-
-See [docs/design.md](docs/design.md) for assumptions, limitations, and the
-planned DG-MAPPO integration.
-
-## Research baselines
-
-An eventual MARL evaluation should compare at matched total bits:
-
-1. original float32 DG-MAPPO communication;
-2. non-equivariant quantized DG-MAPPO;
-3. equivariant but uncompressed communication;
-4. symmetry-reduced quantized communication;
+1. original float-message DG-MAPPO;
+2. non-equivariant quantized communication;
+3. equivariant uncompressed communication;
+4. full symmetry-reduced quantized communication;
 5. no communication.
 
-This separation is essential: symmetry alone does not establish a bandwidth
-gain, and quantization alone does not establish a symmetry benefit.
+Current code establishes items 1 and 4, plus the shared-codec ablation. The
+non-equivariant quantized, equivariant uncompressed, and no-communication
+ablations remain the next experimental implementation milestone.
 
-## License
+## Provenance and license
 
-MIT
+The `mat` training stack and long-range predator–prey environment are ported
+from the companion DG-MAPPO repository and adapted for device portability and
+SR communication. New and ported code is distributed under the MIT license.

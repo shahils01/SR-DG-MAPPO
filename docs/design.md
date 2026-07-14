@@ -2,10 +2,10 @@
 
 ## Scope of the initial version
 
-SR-DG-MAPPO v0.1 implements the smallest system that can falsify the proposed
-communication hypothesis. It does not reproduce the full DG-MAPPO training
-stack. Instead, it makes the inferred scene representation and transmitted bit
-rate explicit.
+SR-DG-MAPPO now contains a trainable predator–prey MAPPO stack ported from
+DG-MAPPO. The standalone diagnostic remains the smallest system that can
+falsify the rate–distortion hypothesis, while `sr_mappo` evaluates whether the
+same mechanism improves control at a fixed message budget.
 
 Each agent maintains a fixed-size target map in its own coordinate frame:
 
@@ -14,12 +14,14 @@ M_i = {(p_im, c_im)} for targets m = 1, ..., M,
 ```
 
 where `p_im` is a two-dimensional relative position and `c_im` is confidence.
-At every communication round, an agent encodes its current map into product-VQ
-tokens. Neighbors decode the map, analytically transport its points into their
-own frames, and confidence-weight the received estimates with their existing
-maps. The fused fixed-size map is re-encoded on the next round. Consequently,
-traffic is fixed per directed edge per round rather than growing with the
-number of message origins.
+At every communication round, each agent encodes its current map with its own
+product-VQ codec. Neighbors decode the map, analytically transport its points
+into their own frames, and apply receiver-specific graph attention. Attention
+logits use only invariant confidence, squared distance, and squared
+disagreement; the weighted coordinate sum is performed after frame alignment.
+The fused fixed-size map is re-encoded on the next round. Consequently, traffic
+is fixed per directed edge per round rather than growing with the number of
+message origins.
 
 ## Symmetry and gauge distinction
 
@@ -60,18 +62,25 @@ reported separately.
 
 ## Integration with DG-MAPPO
 
-The intended integration is:
+The implemented integration is:
 
 1. Replace the opaque float32 D-GAT message with codec tokens.
 2. Keep the communication module inside the training computation graph; do not
    store only detached latents in the rollout buffer.
 3. Feed the fused receiver-frame map, or an invariant readout of it, to each
    actor and critic alongside the raw local observation.
-4. Optimize PPO loss, local reconstruction, equivariance consistency, and VQ
-   commitment loss jointly.
+4. Optimize PPO loss, local reconstruction, and VQ commitment/codebook losses
+   jointly. Frame equivariance is analytic for the transport layer and is
+   monitored by tests rather than approximated by a learned penalty.
 5. Use simulator global state only to report raw and quotient inference error.
-6. Sweep codebook size and token count to estimate a return-versus-bits Pareto
-   frontier.
+6. Log message bits, bits per agent, reconstruction, codebook perplexity, and
+   map coverage alongside PPO metrics.
+7. Maintain per-agent codec, attention, readout, actor, and critic modules;
+   update them with agent-local PPO gradients and then mix corresponding
+   parameters over the communication graph using DG-MAPPO's D-SGD rule.
+
+Sweeping codebook size and token count to estimate a return-versus-bits Pareto
+frontier is now an experiment task rather than an architectural dependency.
 
 ## Theoretical target
 
